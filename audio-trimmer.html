@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Audio Trimmer</title>
+<style>
+  body { font-family: Arial, sans-serif; max-width: 900px; margin: 20px auto; padding: 0 15px; background:#f7f7f7; color:#222; }
+  h1 { font-size: 1.6em; }
+  .card { background:#fff; border:1px solid #ddd; border-radius:8px; padding:16px; margin-bottom:16px; }
+  #dropzone { border:2px dashed #999; border-radius:8px; padding:40px; text-align:center; color:#666; cursor:pointer; }
+  #dropzone.hover { background:#eef4ff; border-color:#2563eb; }
+  #waveWrap { position:relative; margin-top:16px; user-select:none; }
+  #waveCanvas { width:100%; height:140px; background:#111; border-radius:6px; display:block; }
+  .handle { position:absolute; top:0; width:10px; height:140px; background:#f5c518; cursor:ew-resize; opacity:0.9; }
+  .handle:hover { opacity:1; }
+  #selRegion { position:absolute; top:0; height:140px; background:rgba(37,99,235,0.25); pointer-events:none; }
+  .row { display:flex; gap:16px; flex-wrap:wrap; align-items:center; margin-top:10px; }
+  .row > div { flex:1; min-width:150px; }
+  label { display:block; font-weight:bold; margin-bottom:4px; font-size:0.9em; }
+  input[type=number] { width:100%; box-sizing:border-box; padding:4px; }
+  button { background:#2563eb; color:#fff; border:none; padding:10px 18px; border-radius:6px; font-size:1em; cursor:pointer; margin-right:8px; }
+  button:hover { background:#1d4ed8; }
+  button:disabled { background:#999; cursor:not-allowed; }
+  select { padding:6px; }
+  audio { width:100%; margin-top:10px; }
+  small.hint { color:#777; }
+  #status { font-size:0.85em; color:#555; margin-top:6px; }
+</style>
+</head>
+<body>
+
+<h1>Audio Trimmer</h1>
+<p><small class="hint">Runs entirely in your browser. Nothing is uploaded anywhere.</small></p>
+
+<div class="card">
+  <div id="dropzone">Drop a WAV or MP3 file here or click to choose</div>
+  <input type="file" id="fileInput" accept=".wav,.mp3,audio/wav,audio/mpeg" style="display:none;">
+
+  <div id="waveWrap" style="display:none;">
+    <canvas id="waveCanvas"></canvas>
+    <div id="selRegion"></div>
+    <div class="handle" id="startHandle"></div>
+    <div class="handle" id="endHandle"></div>
+  </div>
+
+  <div class="row" id="controls" style="display:none;">
+    <div>
+      <label>Start (sec)</label>
+      <input type="number" id="startTime" step="0.01" min="0">
+    </div>
+    <div>
+      <label>End (sec)</label>
+      <input type="number" id="endTime" step="0.01" min="0">
+    </div>
+    <div>
+      <label>Export Format</label>
+      <select id="exportFormat">
+        <option value="wav">WAV</option>
+        <option value="mp3">MP3</option>
+      </select>
+    </div>
+  </div>
+
+  <audio id="previewPlayer" controls style="display:none;"></audio>
+
+  <div style="margin-top:12px;">
+    <button id="playSelectionBtn" disabled>Preview Selection</button>
+    <button id="trimBtn" disabled>Trim &amp; Download</button>
+  </div>
+  <div id="status"></div>
+</div>
+
+<!-- Local MP3 encoder library. Save lame.min.js from
+     https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js
+     (or https://github.com/zhuker/lamejs) in the same folder as this file. -->
+<script src="lame.min.js" onerror="document.getElementById('status').textContent='MP3 export unavailable: lame.min.js not found in this folder. WAV export still works.';"></script>
+
+<script>
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const waveWrap = document.getElementById('waveWrap');
+const waveCanvas = document.getElementById('waveCanvas');
+const selRegion = document.getElementById('selRegion');
+const startHandle = document.getElementById('startHandle');
+const endHandle = document.getElementById('endHandle');
+const controls = document.getElementById('controls');
+const startTimeEl = document.getElementById('startTime');
+const endTimeEl = document.getElementById('endTime');
+const exportFormatEl = document.getElementById('exportFormat');
+const previewPlayer = document.getElementById('previewPlayer');
+const playSelectionBtn = document.getElementById('playSelectionBtn');
+const trimBtn = document.getElementById('trimBtn');
+const statusEl = document.getElementById('status');
+
+let audioCtx;
+let audioBuffer = null;
+let originalFileName = '';
+let duration = 0;
+let dragTarget = null;
+
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', e => { e.preventDefault(); dropzone.classList.add('hover'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('hover'));
+dropzone.addEventListener('drop', e => {
+  e.preventDefault();
+  dropzone.classList.remove('hover');
+  if (e.dataTransfer.files.length) loadFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) loadFile(fileInput.files[0]);
+});
+
+async function loadFile(file) {
+  statusEl.textContent = 'Loading and decoding audio...';
+  originalFileName = file.name.replace(/\.[^/.]+$/, '');
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  const arrayBuf = await file.arrayBuffer();
+  try {
+    audioBuffer = await audioCtx.decodeAudioData(arrayBuf);
+  } catch (err) {
+    statusEl.textContent = 'Could not decode this file. Try a standard WAV or MP3.';
+    return;
+  }
+  duration = audioBuffer.duration;
+  drawWaveform();
+  waveWrap.style.display = 'block';
+  controls.style.display = 'flex';
+  startTimeEl.value = 0;
+  endTimeEl.value = duration.toFixed(2);
+  startTimeEl.max = duration;
+  endTimeEl.max = duration;
+  updateHandles();
+  playSelectionBtn.disabled = false;
+  trimBtn.disabled = false;
+  statusEl.textContent = `Loaded: ${file.name} (${duration.toFixed(2)}s)`;
+}
+
+function drawWaveform() {
+  const ctx2d = waveCanvas.getContext('2d');
+  const width = waveCanvas.clientWidth || 800;
+  const height = 140;
+  waveCanvas.width = width;
+  waveCanvas.height = height;
+  ctx2d.fillStyle = '#111';
+  ctx2d.fillRect(0, 0, width, height);
+
+  const data = audioBuffer.getChannelData(0);
+  const step = Math.ceil(data.length / width);
+  const amp = height / 2;
+  ctx2d.strokeStyle = '#4ade80';
+  ctx2d.beginPath();
+  for (let i = 0; i < width; i++) {
+    let min = 1.0, max = -1.0;
+    for (let j = 0; j < step; j++) {
+      const datum = data[i * step + j];
+      if (datum === undefined) continue;
+      if (datum < min) min = datum;
+      if (datum > max) max = datum;
+    }
+    ctx2d.moveTo(i, amp + min * amp);
+    ctx2d.lineTo(i, amp + max * amp);
+  }
+  ctx2d.stroke();
+}
+
+function timeToX(t) {
+  const width = waveCanvas.clientWidth || 800;
+  return (t / duration) * width;
+}
+function xToTime(x) {
+  const width = waveCanvas.clientWidth || 800;
+  return Math.max(0, Math.min(duration, (x / width) * duration));
+}
+
+function updateHandles() {
+  const s = parseFloat(startTimeEl.value) || 0;
+  const e = parseFloat(endTimeEl.value) || duration;
+  const sx = timeToX(s);
+  const ex = timeToX(e);
+  startHandle.style.left = sx + 'px';
+  endHandle.style.left = (ex - 10) + 'px';
+  selRegion.style.left = sx + 'px';
+  selRegion.style.width = Math.max(0, ex - sx) + 'px';
+}
+
+[startHandle, endHandle].forEach(h => {
+  h.addEventListener('mousedown', e => { dragTarget = h; e.preventDefault(); });
+});
+document.addEventListener('mousemove', e => {
+  if (!dragTarget) return;
+  const rect = waveCanvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const t = xToTime(x);
+  if (dragTarget === startHandle) {
+    startTimeEl.value = Math.min(t, parseFloat(endTimeEl.value) - 0.01).toFixed(2);
+  } else {
+    endTimeEl.value = Math.max(t, parseFloat(startTimeEl.value) + 0.01).toFixed(2);
+  }
+  updateHandles();
+});
+document.addEventListener('mouseup', () => { dragTarget = null; });
+
+startTimeEl.addEventListener('input', updateHandles);
+endTimeEl.addEventListener('input', updateHandles);
+window.addEventListener('resize', () => { if (audioBuffer) { drawWaveform(); updateHandles(); } });
+
+function getTrimmedBuffer() {
+  const s = parseFloat(startTimeEl.value) || 0;
+  const e = parseFloat(endTimeEl.value) || duration;
+  const startSample = Math.floor(s * audioBuffer.sampleRate);
+  const endSample = Math.floor(e * audioBuffer.sampleRate);
+  const frameCount = Math.max(1, endSample - startSample);
+  const trimmed = audioCtx.createBuffer(audioBuffer.numberOfChannels, frameCount, audioBuffer.sampleRate);
+  for (let ch = 0; ch < audioBuffer.numberOfChannels; ch++) {
+    const srcData = audioBuffer.getChannelData(ch);
+    const destData = trimmed.getChannelData(ch);
+    destData.set(srcData.subarray(startSample, endSample));
+  }
+  return trimmed;
+}
+
+playSelectionBtn.addEventListener('click', () => {
+  const trimmed = getTrimmedBuffer();
+  const wavBlob = bufferToWavBlob(trimmed);
+  previewPlayer.src = URL.createObjectURL(wavBlob);
+  previewPlayer.style.display = 'block';
+  previewPlayer.play();
+});
+
+trimBtn.addEventListener('click', () => {
+  const trimmed = getTrimmedBuffer();
+  const format = exportFormatEl.value;
+  if (format === 'wav') {
+    const blob = bufferToWavBlob(trimmed);
+    downloadBlob(blob, `${originalFileName}_trimmed.wav`);
+  } else {
+    if (typeof lamejs === 'undefined') {
+      statusEl.textContent = 'MP3 export needs lame.min.js in this folder. Exporting WAV instead.';
+      const blob = bufferToWavBlob(trimmed);
+      downloadBlob(blob, `${originalFileName}_trimmed.wav`);
+      return;
+    }
+    statusEl.textContent = 'Encoding MP3...';
+    setTimeout(() => {
+      const blob = bufferToMp3Blob(trimmed);
+      downloadBlob(blob, `${originalFileName}_trimmed.mp3`);
+      statusEl.textContent = 'MP3 export complete.';
+    }, 10);
+  }
+});
+
+function downloadBlob(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// --- WAV encoding ---
+function bufferToWavBlob(buffer) {
+  const numChannels = buffer.numberOfChannels;
+  const sampleRate = buffer.sampleRate;
+  const format = 1; // PCM
+  const bitDepth = 16;
+
+  let interleaved;
+  if (numChannels === 2) {
+    interleaved = interleave(buffer.getChannelData(0), buffer.getChannelData(1));
+  } else {
+    interleaved = buffer.getChannelData(0);
+  }
+
+  const dataLength = interleaved.length * (bitDepth / 8);
+  const bufferArr = new ArrayBuffer(44 + dataLength);
+  const view = new DataView(bufferArr);
+
+  writeString(view, 0, 'RIFF');
+  view.setUint32(4, 36 + dataLength, true);
+  writeString(view, 8, 'WAVE');
+  writeString(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, format, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * numChannels * (bitDepth / 8), true);
+  view.setUint16(32, numChannels * (bitDepth / 8), true);
+  view.setUint16(34, bitDepth, true);
+  writeString(view, 36, 'data');
+  view.setUint32(40, dataLength, true);
+
+  floatTo16BitPCM(view, 44, interleaved);
+
+  return new Blob([bufferArr], { type: 'audio/wav' });
+}
+
+function interleave(left, right) {
+  const length = left.length + right.length;
+  const result = new Float32Array(length);
+  let index = 0, inputIndex = 0;
+  while (index < length) {
+    result[index++] = left[inputIndex];
+    result[index++] = right[inputIndex];
+    inputIndex++;
+  }
+  return result;
+}
+
+function floatTo16BitPCM(view, offset, input) {
+  for (let i = 0; i < input.length; i++, offset += 2) {
+    const s = Math.max(-1, Math.min(1, input[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+}
+
+function writeString(view, offset, str) {
+  for (let i = 0; i < str.length; i++) {
+    view.setUint8(offset + i, str.charCodeAt(i));
+  }
+}
+
+// --- MP3 encoding (requires lame.min.js loaded locally) ---
+function bufferToMp3Blob(buffer) {
+  const numChannels = Math.min(buffer.numberOfChannels, 2);
+  const sampleRate = buffer.sampleRate;
+  const mp3encoder = new lamejs.Mp3Encoder(numChannels, sampleRate, 128);
+  const mp3Data = [];
+
+  const samplesLeft = floatTo16Array(buffer.getChannelData(0));
+  const samplesRight = numChannels === 2 ? floatTo16Array(buffer.getChannelData(1)) : null;
+
+  const blockSize = 1152;
+  for (let i = 0; i < samplesLeft.length; i += blockSize) {
+    const leftChunk = samplesLeft.subarray(i, i + blockSize);
+    let mp3buf;
+    if (numChannels === 2) {
+      const rightChunk = samplesRight.subarray(i, i + blockSize);
+      mp3buf = mp3encoder.encodeBuffer(leftChunk, rightChunk);
+    } else {
+      mp3buf = mp3encoder.encodeBuffer(leftChunk);
+    }
+    if (mp3buf.length > 0) mp3Data.push(new Int8Array(mp3buf));
+  }
+  const finalBuf = mp3encoder.flush();
+  if (finalBuf.length > 0) mp3Data.push(new Int8Array(finalBuf));
+
+  return new Blob(mp3Data, { type: 'audio/mp3' });
+}
+
+function floatTo16Array(floatArr) {
+  const out = new Int16Array(floatArr.length);
+  for (let i = 0; i < floatArr.length; i++) {
+    const s = Math.max(-1, Math.min(1, floatArr[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return out;
+}
+</script>
+
+</body>
+</html>

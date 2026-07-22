@@ -49,7 +49,7 @@ only play it), so MP3 export needs a small, free, open-source encoder library ca
 **One-time setup:**
 
 1. Grab `lame.min.js` from [the lamejs project](https://github.com/zhuker/lamejs) (or via
-   [jsDelivr](https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js))
+   [jsDelivr](https://cdn.jsdelivr.net/npm/lamejs@1.2.1/lame.min.js)) -- (Or from this repo)
 2. Drop it in the **same folder** as `audio-trimmer.html`
 3. Reload the page. MP3 export now works too.
 
